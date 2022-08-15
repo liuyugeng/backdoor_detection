@@ -312,8 +312,8 @@ def strip(device, args, clean_set):
 
     FAR = sum(i > threshold for i in entropy_trojan)
     FRR = sum(i < threshold for i in entropy_benigh)
-    print(FRR/len(rest)*n_sample)
-    print(FAR/10*n_sample)
+    print(FRR/len(rest))
+    print(FAR/n_test)
     
 
     # bins = 30
