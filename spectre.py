@@ -185,7 +185,7 @@ class AlexNet(nn.Module):
         x = self.features(x)
         x = x.view(x.size(0), 4096)
         x1 = self.classifier(x)
-        return x1, x
+        return x1
 
 
 class ConvNet(nn.Module):
@@ -204,7 +204,7 @@ class ConvNet(nn.Module):
         out = self.features(x)
         out = out.view(out.size(0), -1)
         out1 = self.classifier(out)
-        return out1, out
+        return out1
 
     def embed(self, x):
         out = self.features(x)
