@@ -304,15 +304,21 @@ def strip(device, args, clean_set):
     entropy_benigh = [x / n_sample for x in entropy_benigh] # get entropy for 2000 clean inputs
     entropy_trojan = [x / n_sample for x in entropy_trojan] # get entropy for 2000 trojaned inputs
 
-    (mu, sigma) = scipy.stats.norm.fit(entropy_benigh)
+    (mu, sigma) = scipy.stats.norm.fit(entropy_trojan)
     print(mu, sigma)
 
     threshold = scipy.stats.norm.ppf(0.01, loc = mu, scale =  sigma) #use a preset FRR of 0.01. This can be 
     print(threshold)
 
     FAR = sum(i > threshold for i in entropy_trojan)
+
+    (mu, sigma) = scipy.stats.norm.fit(entropy_benigh)
+    print(mu, sigma)
+
+    threshold = scipy.stats.norm.ppf(0.01, loc = mu, scale =  sigma) #use a preset FRR of 0.01. This can be 
+    print(threshold)
     FRR = sum(i < threshold for i in entropy_benigh)
-    print(FRR/len(rest))
+    print(FRR/n_test)
     print(FAR/n_test)
     
 
@@ -373,13 +379,19 @@ def strip_for_test(device, args, clean_set):
     entropy_benigh = [x / n_sample for x in entropy_benigh] # get entropy for 2000 clean inputs
     entropy_trojan = [x / n_sample for x in entropy_trojan] # get entropy for 2000 trojaned inputs
 
-    (mu, sigma) = scipy.stats.norm.fit(entropy_benigh)
+    (mu, sigma) = scipy.stats.norm.fit(entropy_trojan)
     print(mu, sigma)
 
     threshold = scipy.stats.norm.ppf(0.01, loc = mu, scale =  sigma) #use a preset FRR of 0.01. This can be 
     print(threshold)
 
     FAR = sum(i > threshold for i in entropy_trojan)
+
+    (mu, sigma) = scipy.stats.norm.fit(entropy_benigh)
+    print(mu, sigma)
+
+    threshold = scipy.stats.norm.ppf(0.01, loc = mu, scale =  sigma) #use a preset FRR of 0.01. This can be 
+    print(threshold)
     FRR = sum(i < threshold for i in entropy_benigh)
     print(FRR/n_test)
     print(FAR/n_test)
