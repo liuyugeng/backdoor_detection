@@ -1,68 +1,170 @@
-import torch
-import numpy as np
-from torch.nn import CrossEntropyLoss
-import tqdm
-from torch.utils.data import DataLoader, TensorDataset
-import matplotlib.pyplot as plt
-from data import get_data
-from model import *
 import os
-import json
-import torch.optim as optim
-
-from art.defences.transformer import poisoning
-from art.defences.detector import poison
-from art.defences.transformer import poisoning
-from art.estimators.classification import PyTorchClassifier
-from art.utils import load_cifar10, preprocess
-from art.attacks.poisoning.perturbations.image_perturbations import add_pattern_bd, add_single_bd
-from art.estimators.classification import KerasClassifier, PyTorchClassifier
-
-import math
-import random
-import numpy as np
-import time
-import scipy
 import cv2
-import scipy.stats
-import torch.nn.functional as F
-
+import json
+import torch
+import scipy
 import argparse
-
+import scipy.stats
+import numpy as np
 import torchvision
+import torch.nn as nn
+import torch.optim as optim
+import matplotlib.pyplot as plt
+import torch.nn.functional as F
 import torchvision.transforms as transforms
 
+
+from datas import get_data
+from art.defences.detector import poison
+from art.defences.transformer import poisoning
+from torch.utils.data import DataLoader, TensorDataset
+from art.estimators.classification import PyTorchClassifier
+
+def get_model(name, nc):
+    if name == "convnet":
+        return ConvNet(channel=nc)
+    else:
+        return AlexNet(channel=nc)
+
+class AlexNet(nn.Module):
+    def __init__(self, channel=3, num_classes=10):
+        super(AlexNet, self).__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(channel, 64, kernel_size=5, stride=1, padding=2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+            nn.LocalResponseNorm(4, alpha=0.001 / 9.0, beta=0.75, k=1),
+            nn.Conv2d(64, 64, kernel_size=5, stride=1, padding=2),
+            nn.ReLU(inplace=True),
+            nn.LocalResponseNorm(4, alpha=0.001 / 9.0, beta=0.75, k=1),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(4096, 384),
+            nn.ReLU(inplace=True),
+            nn.Linear(384, 192),
+            nn.ReLU(inplace=True),
+            nn.Linear(192, num_classes),
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = x.view(x.size(0), 4096)
+        x = self.classifier(x)
+        return x
+
+
+class ConvNet(nn.Module):
+    def __init__(self, channel=3, num_classes=10, net_width=128, net_depth=3, net_act='relu', net_norm='none', net_pooling='avgpooling', im_size = (32,32)):
+        super(ConvNet, self).__init__()
+
+        self.features, shape_feat = self._make_layers(channel, net_width, net_depth, net_norm, net_act, net_pooling, im_size)
+        num_feat = shape_feat[0]*shape_feat[1]*shape_feat[2]
+        self.classifier = nn.Sequential(
+            nn.Linear(num_feat, 192),
+            nn.ReLU(inplace=True),
+            nn.Linear(192, num_classes),
+        )
+
+    def forward(self, x):
+        out = self.features(x)
+        out = out.view(out.size(0), -1)
+        out = self.classifier(out)
+        return out
+
+    def embed(self, x):
+        out = self.features(x)
+        out = out.view(out.size(0), -1)
+        return out
+
+    def _get_activation(self, net_act):
+        if net_act == 'sigmoid':
+            return nn.Sigmoid()
+        elif net_act == 'relu':
+            return nn.ReLU(inplace=True)
+        elif net_act == 'leakyrelu':
+            return nn.LeakyReLU(negative_slope=0.01)
+        else:
+            exit('unknown activation function: %s'%net_act)
+
+    def _get_pooling(self, net_pooling):
+        if net_pooling == 'maxpooling':
+            return nn.MaxPool2d(kernel_size=2, stride=2)
+        elif net_pooling == 'avgpooling':
+            return nn.AvgPool2d(kernel_size=2, stride=2)
+        elif net_pooling == 'none':
+            return None
+        else:
+            exit('unknown net_pooling: %s'%net_pooling)
+
+    def _get_normlayer(self, net_norm, shape_feat):
+        # shape_feat = (c*h*w)
+        if net_norm == 'batchnorm':
+            return nn.BatchNorm2d(shape_feat[0], affine=True)
+        elif net_norm == 'layernorm':
+            return nn.LayerNorm(shape_feat, elementwise_affine=True)
+        elif net_norm == 'instancenorm':
+            return nn.GroupNorm(shape_feat[0], shape_feat[0], affine=True)
+        elif net_norm == 'groupnorm':
+            return nn.GroupNorm(4, shape_feat[0], affine=True)
+        elif net_norm == 'none':
+            return None
+        else:
+            exit('unknown net_norm: %s'%net_norm)
+
+    def _make_layers(self, channel, net_width, net_depth, net_norm, net_act, net_pooling, im_size):
+        layers = []
+        in_channels = channel
+        if im_size[0] == 28:
+            im_size = (32, 32)
+        shape_feat = [in_channels, im_size[0], im_size[1]]
+        for d in range(net_depth):
+            layers += [nn.Conv2d(in_channels, net_width, kernel_size=3, padding=3 if channel == 1 and d == 0 else 1)]
+            shape_feat[0] = net_width
+            if net_norm != 'none':
+                layers += [self._get_normlayer(net_norm, shape_feat)]
+            layers += [self._get_activation(net_act)]
+            in_channels = net_width
+            if net_pooling != 'none':
+                layers += [self._get_pooling(net_pooling)]
+                shape_feat[1] //= 2
+                shape_feat[2] //= 2
+
+        return nn.Sequential(*layers), shape_feat
+
+def weight_init(layer):
+    if isinstance(layer, nn.Conv2d):
+        nn.init.xavier_uniform_(layer.weight, gain=nn.init.calculate_gain('relu'))
+        layer.bias.data.zero_()
 
 
 def train(model, target_label, train_loader, param):
     print("Processing label: {}".format(target_label))
 
     width, height = param["image_size"]
-    trigger = torch.rand((3, width, height), requires_grad=True)
+    nc = param["nc"]
+    trigger = torch.rand((nc, width, height), requires_grad=True)
     trigger = trigger.to(device).detach().requires_grad_(True)
     mask = torch.rand((width, height), requires_grad=True)
     mask = mask.to(device).detach().requires_grad_(True)
 
-    Epochs = param["Epochs"]
-    lamda = param["lamda"]
-
     min_norm = np.inf
     min_norm_count = 0
 
-    criterion = CrossEntropyLoss()
+    criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam([{"params": trigger},{"params": mask}],lr=0.005)
     model.to(device)
     model.eval()
 
-    for epoch in range(Epochs):
+    for epoch in range(100):
         norm = 0.0
-        for images, _ in tqdm.tqdm(train_loader, desc='Epoch %3d' % (epoch + 1)):
+        for images, _ in train_loader:
             optimizer.zero_grad()
             images = images.to(device)
             trojan_images = (1 - torch.unsqueeze(mask, dim=0)) * images + torch.unsqueeze(mask, dim=0) * trigger
             y_pred = model(trojan_images)
             y_target = torch.full((y_pred.size(0),), target_label, dtype=torch.long).to(device)
-            loss = criterion(y_pred, y_target) + lamda * torch.sum(torch.abs(mask))
+            loss = criterion(y_pred, y_target) + 0.01 * torch.sum(torch.abs(mask))
             loss.backward()
             optimizer.step()
 
@@ -72,7 +174,7 @@ def train(model, target_label, train_loader, param):
                 torch.clip_(trigger, 0, 1)
                 torch.clip_(mask, 0, 1)
                 norm = torch.sum(torch.abs(mask))
-        print("norm: {}".format(norm))
+        # print("norm: {}".format(norm))
 
         # to early stop
         if norm < min_norm:
@@ -86,29 +188,21 @@ def train(model, target_label, train_loader, param):
 
     return trigger.cpu(), mask.cpu()
 
-##### Neural Cleanse #####
-
-def reverse_engineer(device):
-    param = {
-        "dataset": "cifar10",
-        "Epochs": 100,
-        "batch_size": 64,
-        "lamda": 0.01,
-        "num_classes": 10,
-        "image_size": (32, 32),
-        "name": "alexnet"
-    }
-    model = get_model(param["name"])
-    model.load_state_dict(torch.load('a_dc_cifar.pth'))
+def reverse_engineer(device, args):
+    model = get_model(args.param["name"], args.nc)
+    model.load_state_dict(torch.load(args.mn+'.pth'))
     model = model.to(device)
-    _, _, x_test, y_test = get_data(param)
+    _, _, x_test, y_test = get_data(args.param)
     x_test, y_test = torch.from_numpy(x_test)/255., torch.from_numpy(y_test)
-    train_loader = DataLoader(TensorDataset(x_test, y_test), batch_size=param["batch_size"], shuffle=False)
+    nc = args.param["nc"]
+    if nc == 1:
+        x_test = torch.unsqueeze(x_test, 1)
+    train_loader = DataLoader(TensorDataset(x_test, y_test), batch_size=args.param["batch_size"], shuffle=False)
     mask_flatten = []
     norm_list = []
     idx_mapping = {}
-    for label in range(param["num_classes"]):
-        trigger, mask = train(model, label, train_loader, param)
+    for label in range(args.param["num_classes"]):
+        trigger, mask = train(model, label, train_loader, args.param)
         norm_list.append(mask.sum().item())
 
         trigger = trigger.cpu().detach().numpy()
@@ -155,22 +249,12 @@ def outlier_detection(l1_norm_list, idx_mapping):
                      for y_label, l_norm in flag_list]))
 
 
-##### Spectral_Signatures #####
+def Spectral_Signatures(device, args):
+    
+    x_train = torch.load(args.mn + '_img.pth')
 
-def Spectral_Signatures(device):
-    param = {
-        "dataset": "svhn",
-        "Epochs": 100,
-        "batch_size": 64,
-        "lamda": 0.01,
-        "num_classes": 10,
-        "image_size": (32, 32),
-        "name": "convnet"
-    }
-    x_train = torch.load('vis_DC_SVHN_ConvNet_10ipc_exp0_iter1000.pth')
-
-    model = get_model(param["name"])
-    model.load_state_dict(torch.load('c_dc_svhn.pth'))
+    model = get_model(args.param["name"], args.nc)
+    model.load_state_dict(torch.load(args.mn + '.pth'))
     model = model.to(device)
 
     y_train = torch.tensor([np.ones(10)*i for i in range(10)], dtype=torch.long, requires_grad=False).view(-1)
@@ -179,7 +263,7 @@ def Spectral_Signatures(device):
     labels = y_train.to(device)
 
     o_train = model(images)
-    (x_raw, y_raw), _, min_, max_ = load_cifar10(raw=True)
+    min_, max_ = 0.0, 255.0
 
     # torch.save(nn_model.state_dict(), "./nn_model.pth")
 
@@ -206,22 +290,22 @@ def Spectral_Signatures(device):
 
     print("------------------- Results using size metric -------------------")
     # print(defence.get_params())
-    report, is_clean_lst = defence.detect_poison()
-    cl = np.array(is_clean_lst)
-    mmsk = cl == 0
-    print(report)
-    print(len(cl[mmsk]))
+    # report, is_clean_lst = defence.detect_poison()
+    # cl = np.array(is_clean_lst)
+    # mmsk = cl == 0
+    # print(report)
+    # print(len(cl[mmsk]))
 
-    is_clean = is_poison_train == 0
+    # is_clean = is_poison_train == 0
 
     # defence.plot_clusters(folder="/home/c02yuli/project/ddbd/dataset-distillation/")
 
-    confusion_matrix = defence.evaluate_defence(is_clean)
-    print("Evaluation defence results for size-based metric: ")
-    jsonObject = json.loads(confusion_matrix)
-    for label in jsonObject:
-        print(label)
-        print(jsonObject[label])
+    # confusion_matrix = defence.evaluate_defence(is_clean)
+    # print("Evaluation defence results for size-based metric: ")
+    # jsonObject = json.loads(confusion_matrix)
+    # for label in jsonObject:
+    #     print(label)
+    #     print(jsonObject[label])
 
     # Visualize clusters:
     # x_train_l = np.transpose(x_train, (0, 3, 1, 2)).astype(np.float32)
@@ -245,11 +329,10 @@ def Spectral_Signatures(device):
     score = score[:,0]
     poisn_mean = score[:10].mean()
     clean_mean = score[10:].mean()
-
+    print("poisn and clean:")
     print(poisn_mean)
     print(clean_mean)
 
-##### strip #####
 
 def superimpose(background, overlay):
     added_image = cv2.addWeighted(background,1,overlay,1,0)
@@ -271,7 +354,7 @@ def entropyCal(background, n, x_train, model, device):
 def strip(device, args, clean_set):
     x_train = torch.load(args.mn + "_img.pth")
 
-    model = get_model(args.m)
+    model = get_model(args.m, args.nc)
     model.load_state_dict(torch.load(args.mn + ".pth"))
     model = model.to(device)
 
@@ -305,18 +388,18 @@ def strip(device, args, clean_set):
     entropy_trojan = [x / n_sample for x in entropy_trojan] # get entropy for 2000 trojaned inputs
 
     (mu, sigma) = scipy.stats.norm.fit(entropy_trojan)
-    print(mu, sigma)
+    # print(mu, sigma)
 
     threshold = scipy.stats.norm.ppf(0.01, loc = mu, scale =  sigma) #use a preset FRR of 0.01. This can be 
-    print(threshold)
+    # print(threshold)
 
     FAR = sum(i > threshold for i in entropy_trojan)
 
     (mu, sigma) = scipy.stats.norm.fit(entropy_benigh)
-    print(mu, sigma)
+    # print(mu, sigma)
 
     threshold = scipy.stats.norm.ppf(0.01, loc = mu, scale =  sigma) #use a preset FRR of 0.01. This can be 
-    print(threshold)
+    # print(threshold)
     FRR = sum(i < threshold for i in entropy_benigh)
     print(FRR/n_test)
     print(FAR/n_test)
@@ -335,11 +418,11 @@ def strip(device, args, clean_set):
     # # fig1.savefig('EntropyDNNDist_T2.pdf')# save the fig as pdf file
     # fig1.savefig('EntropyDNNDist_T3.svg')
 
-    min_benign_entropy = np.mean(entropy_benigh)
-    max_trojan_entropy = np.mean(entropy_trojan)
+    # min_benign_entropy = np.mean(entropy_benigh)
+    # max_trojan_entropy = np.mean(entropy_trojan)
 
-    print(min_benign_entropy)# check min entropy of clean inputs
-    print(max_trojan_entropy)# check max entropy of trojaned inputs
+    # print(min_benign_entropy)# check min entropy of clean inputs
+    # print(max_trojan_entropy)# check max entropy of trojaned inputs
 
 def get_poison(x_poison, trigger):
     trigger_loc = (29, 31)
@@ -347,7 +430,7 @@ def get_poison(x_poison, trigger):
     return x_poison
 
 def strip_for_test(device, args, clean_set):
-    model = get_model(args.m)
+    model = get_model(args.m, args.nc)
     model.load_state_dict(torch.load(args.mn + ".pth"))
     model = model.to(device)
 
@@ -369,29 +452,29 @@ def strip_for_test(device, args, clean_set):
 
     for j in range(n_test):
             x_background = x_train[j] 
-            entropy_benigh[j] = entropyCal(x_background, n_sample, x_train[n_test*2:n_test*2+n_sample], nn_model, state.device)
+            entropy_benigh[j] = entropyCal(x_background, n_sample, x_train[n_test*2:n_test*2+n_sample], model, device)
 
     for j in range(n_test):
         x_poison = x_train[j+n_test]
         x_poison = get_poison(x_poison, trigger)
-        entropy_trojan[j] = entropyCal(x_poison, n_sample, x_train[n_test*2:n_test*2+n_sample], nn_model, state.device)
+        entropy_trojan[j] = entropyCal(x_poison, n_sample, x_train[n_test*2:n_test*2+n_sample], model, device)
 
     entropy_benigh = [x / n_sample for x in entropy_benigh] # get entropy for 2000 clean inputs
     entropy_trojan = [x / n_sample for x in entropy_trojan] # get entropy for 2000 trojaned inputs
 
     (mu, sigma) = scipy.stats.norm.fit(entropy_trojan)
-    print(mu, sigma)
+    # print(mu, sigma)
 
     threshold = scipy.stats.norm.ppf(0.01, loc = mu, scale =  sigma) #use a preset FRR of 0.01. This can be 
-    print(threshold)
+    # print(threshold)
 
     FAR = sum(i > threshold for i in entropy_trojan)
 
     (mu, sigma) = scipy.stats.norm.fit(entropy_benigh)
-    print(mu, sigma)
+    # print(mu, sigma)
 
     threshold = scipy.stats.norm.ppf(0.01, loc = mu, scale =  sigma) #use a preset FRR of 0.01. This can be 
-    print(threshold)
+    # print(threshold)
     FRR = sum(i < threshold for i in entropy_benigh)
     print(FRR/n_test)
     print(FAR/n_test)
@@ -410,11 +493,47 @@ def strip_for_test(device, args, clean_set):
     # # fig1.savefig('EntropyDNNDist_T2.pdf')# save the fig as pdf file
     # fig1.savefig('EntropyDNNDist_T3.svg')
 
-    min_benign_entropy = np.mean(entropy_benigh)
-    max_trojan_entropy = np.mean(entropy_trojan)
+    # min_benign_entropy = np.mean(entropy_benigh)
+    # max_trojan_entropy = np.mean(entropy_trojan)
 
-    print(min_benign_entropy)# check min entropy of clean inputs
-    print(max_trojan_entropy)# check max entropy of trojaned inputs
+    # print(min_benign_entropy)# check min entropy of clean inputs
+    # print(max_trojan_entropy)# check max entropy of trojaned inputs
+
+def test_backdoor(device, args, clean_set):
+    model = get_model(args.m, args.nc)
+    model.load_state_dict(torch.load(args.mn + ".pth"))
+    model = model.to(device)
+    model.eval()
+
+    input_size = (args.param["image_size"][0], args.param["image_size"][1], args.nc)
+    trigger_loc = (args.param["image_size"][0]-3, args.param["image_size"][0]-1)
+    init_trigger = np.zeros(input_size)
+    init_backdoor = np.random.randint(1, 256,(2, 2, args.nc))
+    init_trigger[trigger_loc[0]:trigger_loc[1], trigger_loc[0]:trigger_loc[1], :] = init_backdoor
+
+    mask = torch.FloatTensor(np.float32(init_trigger > 0).transpose((2, 0, 1))).to(device)
+    trigger = torch.load(args.mn + "_trigger.pth")
+
+    test_loader = DataLoader(clean_set, batch_size=len(clean_set))
+
+    acc_avg = 0
+    num_exp = 0
+
+    for img, lab in test_loader:
+        img = img.float().to(device)
+        lab = lab.long().to(device)
+        img[:] = img[:] * (1 - mask) + trigger[0] * mask
+        lab[:] = 0
+        output = model(img)
+        n_b = lab.shape[0]
+        acc = np.sum(np.equal(np.argmax(output.cpu().data.numpy(), axis=-1), lab.cpu().data.numpy()))
+
+        acc_avg += acc
+        num_exp += n_b
+
+    acc_avg /= num_exp
+
+    print(acc_avg)
 
 
 if __name__ == "__main__":
@@ -422,7 +541,7 @@ if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('-d', type=str, required=False, default='cifar10')
+    parser.add_argument('-d', type=str, required=False, default='fmnist')
     parser.add_argument('-m', type=str, required=False, default='alexnet')
     parser.add_argument('-a', type=str, required=False, default='dc')
     args = parser.parse_args()
@@ -447,6 +566,7 @@ if __name__ == "__main__":
             args.mn += "dc"
 
         args.mn += "_cifar"
+        args.nc = 3
         
         
     elif args.d == "stl10":
@@ -470,6 +590,28 @@ if __name__ == "__main__":
             args.mn += "dc"
 
         args.mn += "_stl"
+        args.nc = 3
+
+    elif args.d == "fmnist":
+        transform = transforms.Compose(
+            [transforms.ToTensor(),
+            transforms.Resize((32,32)),
+            transforms.Normalize((0.2861,), (0.3530,))])
+        clean_set = torchvision.datasets.FashionMNIST(root='../ddbd/dataset-distillation/data', train=False,
+                                        download=True, transform=transform)
+        if args.m == "alexnet":
+            args.mn += "a"
+        else:
+            args.mn += "c"
+        args.mn += "_"
+
+        if args.a == "dd":
+            args.mn += "dd"
+        else:
+            args.mn += "dc"
+
+        args.mn += "_fmnist"
+        args.nc = 1
     else:
         transform = transforms.Compose(
             [transforms.ToTensor(),
@@ -490,8 +632,23 @@ if __name__ == "__main__":
             args.mn += "dc"
 
         args.mn += "_svhn"
-    
-    # reverse_engineer(device)
-    # Spectral_Signatures(device)
-    # strip(device, args, clean_set)
+
+        args.nc = 3
+
+    args.param = {
+        "dataset": args.d,
+        "Epochs": 100,
+        "batch_size": 64,
+        "lamda": 0.01,
+        "num_classes": 10,
+        "image_size": (32, 32),
+        "name": args.m,
+        "nc": args.nc
+    }
+
+    test_backdoor(device, args, clean_set)
+
+    reverse_engineer(device, args)
+    Spectral_Signatures(device, args)
+    strip(device, args, clean_set)
     strip_for_test(device, args, clean_set)

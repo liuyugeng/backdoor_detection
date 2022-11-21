@@ -154,11 +154,11 @@ def filter_gaussian_mean(X: np.ndarray,
         random_state=random_state
     )
 
-def get_model(name):
+def get_model(name, nc):
     if name == "convnet":
-        return ConvNet()
+        return ConvNet(channel=nc)
     else:
-        return AlexNet()
+        return AlexNet(channel=nc)
 
 class AlexNet(nn.Module):
     def __init__(self, channel=3, num_classes=10):
@@ -185,7 +185,7 @@ class AlexNet(nn.Module):
         x = self.features(x)
         x = x.view(x.size(0), 4096)
         x1 = self.classifier(x)
-        return x1
+        return x1, x
 
 
 class ConvNet(nn.Module):
@@ -204,7 +204,7 @@ class ConvNet(nn.Module):
         out = self.features(x)
         out = out.view(out.size(0), -1)
         out1 = self.classifier(out)
-        return out1
+        return out1, out
 
     def embed(self, x):
         out = self.features(x)
@@ -266,6 +266,17 @@ class ConvNet(nn.Module):
 
         return nn.Sequential(*layers), shape_feat
 
+
+def weight_init(layer):  #初始化权重
+    if isinstance(layer, nn.Conv2d):
+        nn.init.xavier_uniform_(layer.weight, gain=nn.init.calculate_gain('relu'))
+        layer.bias.data.zero_()
+    # elif isinstance(m, nn.BatchNorm3d):
+    #     m.weight.data.fill_(1)
+    #     m.bias.data.zero_()
+    # elif isinstance(m, nn.Linear):
+    #     m.weight.data.normal_(0, 0.02)
+    #     m.bias.data.zero_()
 
 def get_features(x_train, y_train, model, num_classes):
 
@@ -390,11 +401,8 @@ def _get_middle_output(x, model, layer):
 
 def cleanser(num_classes, args, oracle_clean_set):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    """
-        adapted from : https://github.com/hsouri/Sleeper-Agent/blob/master/forest/filtering_defenses.py
-    """
 
-    model = get_model(args.m)
+    model = get_model(args.m, args.nc)
     model.load_state_dict(torch.load(args.mn + ".pth"))
     model = model.to(device)
 
@@ -514,7 +522,7 @@ def cleanser(num_classes, args, oracle_clean_set):
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('-d', type=str, required=False, default='cifar10')
+    parser.add_argument('-d', type=str, required=False, default='fmnist')
     parser.add_argument('-m', type=str, required=False, default='alexnet')
     parser.add_argument('-a', type=str, required=False, default='dc')
     args = parser.parse_args()
@@ -540,6 +548,7 @@ if __name__=='__main__':
             args.mn += "dc"
 
         args.mn += "_cifar"
+        args.nc = 3
         
         
     elif args.d == "stl10":
@@ -563,6 +572,28 @@ if __name__=='__main__':
             args.mn += "dc"
 
         args.mn += "_stl"
+        args.nc = 3
+
+    elif args.d == "fmnist":
+        transform = transforms.Compose(
+            [transforms.ToTensor(),
+            transforms.Resize((32,32)),
+            transforms.Normalize((0.2861,), (0.3530,))])
+        clean_set = torchvision.datasets.FashionMNIST(root='../ddbd/dataset-distillation/data', train=False,
+                                        download=True, transform=transform)
+        if args.m == "alexnet":
+            args.mn += "a"
+        else:
+            args.mn += "c"
+        args.mn += "_"
+
+        if args.a == "dd":
+            args.mn += "dd"
+        else:
+            args.mn += "dc"
+
+        args.mn += "_fmnist"
+        args.nc = 1
     else:
         transform = transforms.Compose(
             [transforms.ToTensor(),
@@ -583,6 +614,7 @@ if __name__=='__main__':
             args.mn += "dc"
 
         args.mn += "_svhn"
+        args.nc = 3
 
     args.bn += args.mn
     suspicious_indices = cleanser(1, args, clean_set)
