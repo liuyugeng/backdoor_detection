@@ -579,7 +579,7 @@ if __name__=='__main__':
             [transforms.ToTensor(),
             transforms.Resize((32,32)),
             transforms.Normalize((0.2861,), (0.3530,))])
-        clean_set = torchvision.datasets.FashionMNIST(root='../ddbd/dataset-distillation/data', train=False,
+        clean_set = torchvision.datasets.FashionMNIST(root='../data', train=False,
                                         download=True, transform=transform)
         if args.m == "alexnet":
             args.mn += "a"

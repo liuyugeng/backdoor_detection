@@ -36,7 +36,7 @@ def fill_param(param):
 
 def get_data(param):
     if param["dataset"] == "cifar10":
-        dst_test = CIFAR10_BADNETS('../ddbd/dataset-distillation/data', train=False, download=True,
+        dst_test = CIFAR10_BADNETS('./data', train=False, download=True,
                     transform=None, trigger_label=0, portion=0, backdoor_size=0, backdoor=False, clean_test=True)
         x_test = []
         y_test = []
@@ -51,7 +51,7 @@ def get_data(param):
         y_test = y_test.astype(np.long)
         return x_test, y_test.reshape((-1,)), x_test, y_test.reshape((-1,))
     if param["dataset"] == "stl10":
-        dst_test = STL10_BADNETS('../ddbd/dataset-distillation/data', split="test", download=True,
+        dst_test = STL10_BADNETS('./data', split="test", download=True,
                     transform=None, trigger_label=0, portion=0, backdoor_size=0, backdoor=False, clean_test=True)
         x_test = []
         y_test = []
@@ -67,7 +67,7 @@ def get_data(param):
         return x_test, y_test.reshape((-1,)), x_test, y_test.reshape((-1,))
 
     if param["dataset"] == "svhn":
-        dst_test = SVHN_BADNETS('../ddbd/dataset-distillation/data', split="test", download=True,
+        dst_test = SVHN_BADNETS('./data', split="test", download=True,
                     transform=None, trigger_label=0, portion=0, backdoor_size=0, backdoor=False, clean_test=True)
         x_test = []
         y_test = []
@@ -83,7 +83,7 @@ def get_data(param):
         return x_test, y_test.reshape((-1,)), x_test, y_test.reshape((-1,))
 
     if param["dataset"] == "fmnist":
-        dst_test = FashionMNIST_BADNETS('../ddbd/dataset-distillation/data', train=False, download=True,
+        dst_test = FashionMNIST_BADNETS('./data', train=False, download=True,
                     transform=None, trigger_label=0, portion=0, backdoor_size=0, backdoor=False, clean_test=True)
         x_test = []
         y_test = []
