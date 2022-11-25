@@ -14,131 +14,16 @@ import torch.nn.functional as F
 import torchvision.transforms as transforms
 
 
-from datas import get_data
+from spectre import _get_middle_output
 from art.defences.detector import poison
+from model import get_model, denoising_model
 from art.defences.transformer import poisoning
 from torch.utils.data import DataLoader, TensorDataset
 from art.estimators.classification import PyTorchClassifier
-
-def get_model(name, nc):
-    if name == "convnet":
-        return ConvNet(channel=nc)
-    else:
-        return AlexNet(channel=nc)
-
-class AlexNet(nn.Module):
-    def __init__(self, channel=3, num_classes=10):
-        super(AlexNet, self).__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(channel, 64, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
-            nn.LocalResponseNorm(4, alpha=0.001 / 9.0, beta=0.75, k=1),
-            nn.Conv2d(64, 64, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(inplace=True),
-            nn.LocalResponseNorm(4, alpha=0.001 / 9.0, beta=0.75, k=1),
-            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
-        )
-        self.classifier = nn.Sequential(
-            nn.Linear(4096, 384),
-            nn.ReLU(inplace=True),
-            nn.Linear(384, 192),
-            nn.ReLU(inplace=True),
-            nn.Linear(192, num_classes),
-        )
-
-    def forward(self, x):
-        x = self.features(x)
-        x = x.view(x.size(0), 4096)
-        x = self.classifier(x)
-        return x
+from datas import get_data, CIFAR10_noise, STL10_noise, SVHN_noise, FashionMNIST_noise
 
 
-class ConvNet(nn.Module):
-    def __init__(self, channel=3, num_classes=10, net_width=128, net_depth=3, net_act='relu', net_norm='none', net_pooling='avgpooling', im_size = (32,32)):
-        super(ConvNet, self).__init__()
-
-        self.features, shape_feat = self._make_layers(channel, net_width, net_depth, net_norm, net_act, net_pooling, im_size)
-        num_feat = shape_feat[0]*shape_feat[1]*shape_feat[2]
-        self.classifier = nn.Sequential(
-            nn.Linear(num_feat, 192),
-            nn.ReLU(inplace=True),
-            nn.Linear(192, num_classes),
-        )
-
-    def forward(self, x):
-        out = self.features(x)
-        out = out.view(out.size(0), -1)
-        out = self.classifier(out)
-        return out
-
-    def embed(self, x):
-        out = self.features(x)
-        out = out.view(out.size(0), -1)
-        return out
-
-    def _get_activation(self, net_act):
-        if net_act == 'sigmoid':
-            return nn.Sigmoid()
-        elif net_act == 'relu':
-            return nn.ReLU(inplace=True)
-        elif net_act == 'leakyrelu':
-            return nn.LeakyReLU(negative_slope=0.01)
-        else:
-            exit('unknown activation function: %s'%net_act)
-
-    def _get_pooling(self, net_pooling):
-        if net_pooling == 'maxpooling':
-            return nn.MaxPool2d(kernel_size=2, stride=2)
-        elif net_pooling == 'avgpooling':
-            return nn.AvgPool2d(kernel_size=2, stride=2)
-        elif net_pooling == 'none':
-            return None
-        else:
-            exit('unknown net_pooling: %s'%net_pooling)
-
-    def _get_normlayer(self, net_norm, shape_feat):
-        # shape_feat = (c*h*w)
-        if net_norm == 'batchnorm':
-            return nn.BatchNorm2d(shape_feat[0], affine=True)
-        elif net_norm == 'layernorm':
-            return nn.LayerNorm(shape_feat, elementwise_affine=True)
-        elif net_norm == 'instancenorm':
-            return nn.GroupNorm(shape_feat[0], shape_feat[0], affine=True)
-        elif net_norm == 'groupnorm':
-            return nn.GroupNorm(4, shape_feat[0], affine=True)
-        elif net_norm == 'none':
-            return None
-        else:
-            exit('unknown net_norm: %s'%net_norm)
-
-    def _make_layers(self, channel, net_width, net_depth, net_norm, net_act, net_pooling, im_size):
-        layers = []
-        in_channels = channel
-        if im_size[0] == 28:
-            im_size = (32, 32)
-        shape_feat = [in_channels, im_size[0], im_size[1]]
-        for d in range(net_depth):
-            layers += [nn.Conv2d(in_channels, net_width, kernel_size=3, padding=3 if channel == 1 and d == 0 else 1)]
-            shape_feat[0] = net_width
-            if net_norm != 'none':
-                layers += [self._get_normlayer(net_norm, shape_feat)]
-            layers += [self._get_activation(net_act)]
-            in_channels = net_width
-            if net_pooling != 'none':
-                layers += [self._get_pooling(net_pooling)]
-                shape_feat[1] //= 2
-                shape_feat[2] //= 2
-
-        return nn.Sequential(*layers), shape_feat
-
-def weight_init(layer):
-    if isinstance(layer, nn.Conv2d):
-        nn.init.xavier_uniform_(layer.weight, gain=nn.init.calculate_gain('relu'))
-        layer.bias.data.zero_()
-
-
-def train(model, target_label, train_loader, param):
+def train(model, target_label, train_loader, param, device):
     print("Processing label: {}".format(target_label))
 
     width, height = param["image_size"]
@@ -190,7 +75,7 @@ def train(model, target_label, train_loader, param):
 
 def reverse_engineer(device, args):
     model = get_model(args.param["name"], args.nc)
-    model.load_state_dict(torch.load(args.mn+'.pth'))
+    model.load_state_dict(torch.load("pth/" + args.mn+'.pth'))
     model = model.to(device)
     _, _, x_test, y_test = get_data(args.param)
     x_test, y_test = torch.from_numpy(x_test)/255., torch.from_numpy(y_test)
@@ -202,7 +87,7 @@ def reverse_engineer(device, args):
     norm_list = []
     idx_mapping = {}
     for label in range(args.param["num_classes"]):
-        trigger, mask = train(model, label, train_loader, args.param)
+        trigger, mask = train(model, label, train_loader, args.param, device)
         norm_list.append(mask.sum().item())
 
         trigger = trigger.cpu().detach().numpy()
@@ -248,13 +133,12 @@ def outlier_detection(l1_norm_list, idx_mapping):
           ', '.join(['%d: %2f' % (y_label, l_norm)
                      for y_label, l_norm in flag_list]))
 
-
 def Spectral_Signatures(device, args):
     
-    x_train = torch.load(args.mn + '_img.pth')
+    x_train = torch.load('pth/' + args.mn + '_img.pth')
 
     model = get_model(args.param["name"], args.nc)
-    model.load_state_dict(torch.load(args.mn + '.pth'))
+    model.load_state_dict(torch.load('pth/' + args.mn + '.pth'))
     model = model.to(device)
 
     y_train = torch.tensor([np.ones(10)*i for i in range(10)], dtype=torch.long, requires_grad=False).view(-1)
@@ -333,7 +217,6 @@ def Spectral_Signatures(device, args):
     print(poisn_mean)
     print(clean_mean)
 
-
 def superimpose(background, overlay):
     added_image = cv2.addWeighted(background,1,overlay,1,0)
     return added_image
@@ -352,10 +235,10 @@ def entropyCal(background, n, x_train, model, device):
     return EntropySum
 
 def strip(device, args, clean_set):
-    x_train = torch.load(args.mn + "_img.pth")
+    x_train = torch.load("pth/" + args.mn + "_img.pth")
 
     model = get_model(args.m, args.nc)
-    model.load_state_dict(torch.load(args.mn + ".pth"))
+    model.load_state_dict(torch.load("pth/" + args.mn + ".pth"))
     model = model.to(device)
 
     # y_train = torch.tensor([np.ones(10)*i for i in range(10)], dtype=torch.long, requires_grad=False).view(-1)
@@ -431,10 +314,10 @@ def get_poison(x_poison, trigger):
 
 def strip_for_test(device, args, clean_set):
     model = get_model(args.m, args.nc)
-    model.load_state_dict(torch.load(args.mn + ".pth"))
+    model.load_state_dict(torch.load("pth/" + args.mn + ".pth"))
     model = model.to(device)
 
-    trigger = torch.load(args.mn + "_trigger.pth")[0].detach().cpu().numpy()
+    trigger = torch.load("pth/" + args.mn + "_trigger.pth")[0].detach().cpu().numpy()
 
     # y_train = torch.tensor([np.ones(10)*i for i in range(10)], dtype=torch.long, requires_grad=False).view(-1)
     train_loader = DataLoader(clean_set, batch_size=len(clean_set))
@@ -501,7 +384,7 @@ def strip_for_test(device, args, clean_set):
 
 def test_backdoor(device, args, clean_set):
     model = get_model(args.m, args.nc)
-    model.load_state_dict(torch.load(args.mn + ".pth"))
+    model.load_state_dict(torch.load("pth/" + args.mn + ".pth"))
     model = model.to(device)
     model.eval()
 
@@ -512,7 +395,7 @@ def test_backdoor(device, args, clean_set):
     init_trigger[trigger_loc[0]:trigger_loc[1], trigger_loc[0]:trigger_loc[1], :] = init_backdoor
 
     mask = torch.FloatTensor(np.float32(init_trigger > 0).transpose((2, 0, 1))).to(device)
-    trigger = torch.load(args.mn + "_trigger.pth")
+    trigger = torch.load("pth/" + args.mn + "_trigger.pth")
 
     test_loader = DataLoader(clean_set, batch_size=len(clean_set))
 
@@ -535,6 +418,394 @@ def test_backdoor(device, args, clean_set):
 
     print(acc_avg)
 
+class SCAn:
+    def __init__(self):
+        self.EPS = 1e-2
+
+
+    def calc_final_score(self, lc_model=None):
+        if lc_model is None:
+            lc_model = self.lc_model
+        sts = lc_model['sts']
+        y = sts[:,1]
+        ai = self.calc_anomaly_index(y/np.max(y))
+        return ai
+
+
+    def calc_anomaly_index(self, a):
+        ma = np.median(a)
+        b = abs(a-ma)
+        mm = np.median(b)*1.4826
+        index = b/mm
+        return index
+
+
+    def build_global_model(self, reprs,labels, n_classes):
+        N = reprs.shape[0]
+        M = reprs.shape[1]
+        L = n_classes
+
+        mean_a = np.mean(reprs,axis=0)
+        X = reprs-mean_a
+
+        cnt_L = np.zeros(L)
+        mean_f = np.zeros([L,M])
+        for k in range(L):
+            idx = (labels==k)
+            cnt_L[k] = np.sum(idx)
+            mean_f[k] = np.mean(X[idx], axis=0)
+
+        u = np.zeros([N,M])
+        e = np.zeros([N,M])
+        for i in range(N):
+            k = labels[i]
+            u[i] = mean_f[k]
+            e[i] = X[i]-u[i]
+        Su = np.cov(np.transpose(u))
+        Se = np.cov(np.transpose(e))
+
+        #EM
+        dist_Su = 1e5
+        dist_Se = 1e5
+        n_iters = 0
+        while (dist_Su+dist_Se > self.EPS) and (n_iters < 100):
+            n_iters += 1
+            last_Su = Su
+            last_Se = Se
+
+            F = np.linalg.pinv(Se)
+            SuF = np.matmul(Su,F)
+
+            G_set = list()
+            for k in range(L):
+                G = -np.linalg.pinv(cnt_L[k]*Su+Se)
+                G = np.matmul(G, SuF)
+                G_set.append(G)
+
+            u_m = np.zeros([L,M])
+            e = np.zeros([N,M])
+            u = np.zeros([N,M])
+
+            for i in range(N):
+                vec = X[i]
+                k = labels[i]
+                G = G_set[k]
+                dd = np.matmul(np.matmul(Se,G),np.transpose(vec))
+                u_m[k] = u_m[k]-np.transpose(dd)
+
+            for i in range(N):
+                vec = X[i]
+                k = labels[i]
+                e[i] = vec-u_m[k]
+                u[i] = u_m[k]
+
+            #max-step
+            Su = np.cov(np.transpose(u))
+            Se = np.cov(np.transpose(e))
+
+            dif_Su = Su-last_Su
+            dif_Se = Se-last_Se
+            dist_Su = np.linalg.norm(dif_Su)
+            dist_Se = np.linalg.norm(dif_Se)
+
+        gb_model = dict()
+        gb_model['Su'] = Su
+        gb_model['Se'] = Se
+        gb_model['mean'] = mean_a
+
+        self.gb_model = gb_model
+        return gb_model
+
+
+    def build_local_model(self, reprs, labels, gb_model, n_classes):
+        Su = gb_model['Su']
+        Se = gb_model['Se']
+        F = np.linalg.pinv(Se)
+        N = reprs.shape[0]
+        M = reprs.shape[1]
+        L = n_classes
+
+        mean_a = np.mean(reprs,axis=0)
+        X = reprs-mean_a
+
+        class_score = np.zeros([L,3])
+        u1 = np.zeros([L,M])
+        u2 = np.zeros([L,M])
+        split_rst = list()
+
+        for k in range(L):
+            selected_idx = (labels==k)
+            cX = X[selected_idx]
+            subg, i_u1, i_u2 = self.find_split(cX, F)
+            i_sc = self.calc_test(cX, Su, Se, F, subg, i_u1, i_u2)
+            split_rst.append(subg)
+            u1[k] = i_u1
+            u2[k] = i_u2
+            class_score[k] = [k,i_sc,np.sum(selected_idx)]
+
+        lc_model = dict()
+        lc_model['sts'] = class_score
+        lc_model['mu1'] = u1
+        lc_model['mu2'] = u2
+        lc_model['subg'] = split_rst
+
+        self.lc_model = lc_model
+        return lc_model
+
+
+    def find_split(self, X, F):
+        N = X.shape[0]
+        M = X.shape[1]
+        subg = np.random.rand(N)
+        if (N==1):
+            subg[0] = 0
+            return (subg, X.copy(), X.copy())
+
+        if np.sum(subg >= 0.5) == 0:
+            subg[0] = 1
+        if np.sum(subg < 0.5) == 0:
+            subg[0] = 0
+        last_z1 = -np.ones(N)
+
+        #EM
+        steps = 0
+        while (np.linalg.norm(subg-last_z1) > self.EPS) and (np.linalg.norm((1-subg)-last_z1) > self.EPS) and (steps < 100):
+            steps += 1
+            last_z1 = subg.copy()
+
+            #max-step
+            #calc u1 and u2
+            idx1 = (subg>=0.5)
+            idx2 = (subg<0.5)
+            if (np.sum(idx1) == 0) or (np.sum(idx2) == 0):
+                break
+            if np.sum(idx1) == 1:
+                u1 = X[idx1]
+            else:
+                u1 = np.mean(X[idx1], axis=0)
+            if np.sum(idx2) == 1:
+                u2 = X[idx2]
+            else:
+                u2 = np.mean(X[idx2], axis=0)
+
+            bias = np.matmul(np.matmul(u1,F),np.transpose(u1)) - np.matmul(np.matmul(u2,F),np.transpose(u2))
+            e2 = u1-u2
+            for i in range(N):
+                e1 = X[i]
+                delta = np.matmul(np.matmul(e1,F),np.transpose(e2))
+                if bias-2*delta < 0:
+                    subg[i] = 1
+                else:
+                    subg[i] = 0
+
+        return (subg, u1, u2)
+
+
+    def calc_test(self, X, Su, Se, F, subg, u1, u2):
+        N = X.shape[0]
+        M = X.shape[1]
+        G = -np.linalg.pinv(N*Su+Se)
+        mu = np.zeros([1,M])
+        for i in range(N):
+            vec = X[i]
+            dd = np.matmul(np.matmul(Se,G),np.transpose(vec))
+            mu = mu-dd
+
+        b1 = np.matmul(np.matmul(mu,F),np.transpose(mu)) - np.matmul(np.matmul(u1,F),np.transpose(u1))
+        b2 = np.matmul(np.matmul(mu,F),np.transpose(mu)) - np.matmul(np.matmul(u2,F),np.transpose(u2))
+        n1 = np.sum(subg>=0.5)
+        n2 = N-n1
+        sc = n1*b1+n2*b2
+
+        for i in range(N):
+            e1 = X[i]
+            if subg[i] >= 0.5:
+                e2 = mu-u1
+            else:
+                e2 = mu-u2
+            sc -= 2*np.matmul(np.matmul(e1,F),np.transpose(e2))
+
+        return sc/N
+    
+def test_SCAn(args, clean_set, device):
+    model = get_model(args.m, args.nc)
+    model.load_state_dict(torch.load("pth/" + args.mn + ".pth"))
+    model = model.to(device)
+    model.eval()
+
+    x_train = torch.load('pth/' + args.mn + '_img.pth').to(device)
+    y_train = torch.tensor([np.ones(10)*i for i in range(10)], dtype=torch.long, requires_grad=False).view(-1).numpy()
+    #np.array([np.ones(10)*i for i in range(args.param['num_classes'])], dtype=np.int_).reshape(-1)
+    o_train = _get_middle_output(x_train, model, -2)
+
+    test_loader = DataLoader(clean_set, batch_size=len(clean_set))
+
+    labs=[]
+    testlocal=[]
+    for batch_idx, (data, target) in enumerate(test_loader):
+        testlocal.append(data)
+        labs.append(target)
+    datas=[]
+    labels=[]
+    for i in range(len(labs)):
+        for j in range(len(labs[i])):
+            if i*len(labs[i])+j>2999:
+                break
+            datas.append(testlocal[i][j])
+            labels.append(labs[i][j])
+    reals=[]
+
+    with torch.no_grad():
+        for i in range(len(datas)):
+            predictions = _get_middle_output(torch.Tensor(datas[i].reshape(1,args.nc,32,32)).to(device), model, -2)
+            reals.append(np.squeeze(predictions.cpu().numpy()))
+    reals=np.array(reals)
+    labels=np.array(labels)
+
+    features= o_train.cpu().detach().numpy()
+    fine_label=y_train
+
+    scan=SCAn()
+    gb=scan.build_global_model(reals,labels,args.param['num_classes'])
+    lc=scan.build_local_model(features,fine_label,gb,args.param['num_classes'])
+    ai=scan.calc_final_score(lc)
+    print(ai)
+
+def dataset_normalization(d):
+    if d == 'cifar10' or d == 'stl10':
+        mean, std = [0.4914, 0.4822, 0.4465], [0.247, 0.243, 0.261]
+    elif d == 'fmnist':
+        mean, std = [0.2861,], [0.3530,]
+    else:
+        mean, std = [0.4379104971885681, 0.44398033618927, 0.4729299545288086], [0.19803012907505035, 0.2010156363248825, 0.19703614711761475]
+
+    return mean, std
+
+def train_epoch(mode, x_train, y_train, net, optimizer, criterion, device):
+    loss_avg, acc_avg, num_exp = 0, 0, 0
+    net = net.to(device)
+    criterion = criterion.to(device)
+
+    if mode == 'train':
+        net.train()
+    else:
+        net.eval()
+
+    n_b = y_train.shape[0]
+
+    output = net(x_train)
+    loss = criterion(output, y_train)
+    acc = np.sum(np.equal(np.argmax(output.cpu().data.numpy(), axis=-1), y_train.cpu().data.numpy()))
+
+    loss_avg += loss.item()*n_b
+    acc_avg += acc
+    num_exp += n_b
+
+    if mode == 'train':
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    loss_avg /= num_exp
+    acc_avg /= num_exp
+
+    return loss_avg, acc_avg
+
+def test_epoch(args, mode, dataloader, net, optimizer, criterion, device, tri=False):
+    acc_avg, num_exp = 0, 0
+    net = net.to(device)
+    criterion = criterion.to(device)
+
+    input_size = (args.param["image_size"][0], args.param["image_size"][1], args.nc)
+    trigger_loc = (args.param["image_size"][0]-3, args.param["image_size"][0]-1)
+    init_trigger = np.zeros(input_size)
+    init_backdoor = np.random.randint(1, 256,(2, 2, args.nc))
+    init_trigger[trigger_loc[0]:trigger_loc[1], trigger_loc[0]:trigger_loc[1], :] = init_backdoor
+
+    mask = torch.FloatTensor(np.float32(init_trigger > 0).transpose((2, 0, 1))).to(device)
+    trigger = torch.load("pth/" + args.mn + "_trigger.pth")
+
+    if mode == 'train':
+        net.train()
+    else:
+        net.eval()
+
+    for i_batch, datum in enumerate(dataloader):
+        img = datum[0].float().to(device)
+        lab = datum[1].long().to(device)
+
+        n_b = lab.shape[0]
+
+        if tri:
+            img[:] = img[:] * (1 - mask) + trigger[0] * mask
+            lab[:] = 0
+
+        output = net(img)
+        acc = np.sum(np.equal(np.argmax(output.cpu().data.numpy(), axis=-1), lab.cpu().data.numpy()))
+
+        acc_avg += acc
+        num_exp += n_b
+
+    acc_avg /= num_exp
+
+    return acc_avg
+
+def test_denoise(args, device, clean_set):
+    mean, std = dataset_normalization(args.d)
+    transform = transforms.Compose([transforms.ToTensor(), transforms.Resize((32,32)), transforms.Normalize(mean=mean, std=std)])
+    if args.d == "cifar10":
+        dataset = CIFAR10_noise(root='../ddbd/dataset-distillation/data', train=True, download=True, transform=transform)
+    elif args.d == "stl10":
+        dataset = STL10_noise(root='../ddbd/dataset-distillation/data', split="train", download=True, transform=transform)
+    elif args.d == "svhn":
+        dataset = SVHN_noise(root='../ddbd/dataset-distillation/data', split="train", download=True, transform=transform)
+    else:
+        dataset = FashionMNIST_noise(root='../ddbd/dataset-distillation/data', download=True, transform=transform)
+    trainloader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=True, num_workers=3)
+    model=denoising_model(nc = args.param['nc']).to(device)
+    criterion=nn.MSELoss()
+    optimizer=optim.SGD(model.parameters(),lr=0.01,weight_decay=1e-5)
+    
+    for epoch in range(20):
+        print("epoch:{}".format(str(epoch)))
+        for dirty,clean,label in (trainloader):
+            dirty=dirty.view(dirty.size(0),-1).type(torch.FloatTensor)
+            clean=clean.view(clean.size(0),-1).type(torch.FloatTensor)
+            dirty,clean=dirty.to(device),clean.to(device)
+            
+            #-----------------Forward Pass----------------------
+            output=model(dirty)
+            loss=criterion(output,clean)
+            #-----------------Backward Pass---------------------
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+    
+    x_train = torch.load('pth/' + args.mn + '_img.pth').to(device)
+    temp = x_train[:10]
+    shape = temp.shape
+    target_model = get_model(args.m, args.nc).to(device)
+    x_train[:10] = model(temp.view(shape[0],-1)).reshape(shape)
+    x_train = x_train.detach().requires_grad_()
+    y_train = torch.arange(args.param['num_classes'], dtype=torch.long, device=device).repeat(10, 1)
+    y_train = y_train.t().reshape(-1)
+    # trainloader = torch.utils.data.DataLoader(x_train, y_train, batch_size=100, shuffle=True, num_workers=0)
+    lr = 0.01
+    target_optimizer = torch.optim.SGD(target_model.parameters(), lr=lr, momentum=0.9, weight_decay=0.0005)
+    target_criterion = nn.CrossEntropyLoss().to(device)
+    for i in range(300):
+        _, acc_train = train_epoch('train', x_train, y_train, target_model, target_optimizer, target_criterion, device)
+        if i ==151:
+            lr *= 0.1
+            optimizer = torch.optim.SGD(target_model.parameters(), lr=lr, momentum=0.9, weight_decay=0.0005)
+    clean_test_loader = DataLoader(clean_set, batch_size=256)
+    acc_test = test_epoch(args, 'test', clean_test_loader, target_model, target_optimizer, target_criterion, device)
+    acc_test_trigger = test_epoch(args, 'test', clean_test_loader, target_model, target_optimizer, target_criterion, device, tri=True)
+    print('ASR: %f' % acc_test_trigger)
+    print('CTA: %f' % acc_test)
+
+
 
 if __name__ == "__main__":
     np.random.seed(42)
@@ -545,6 +816,13 @@ if __name__ == "__main__":
     parser.add_argument('-m', type=str, required=False, default='alexnet')
     parser.add_argument('-a', type=str, required=False, default='dc')
     args = parser.parse_args()
+
+    # for ddd in ['cifar10', 'fmnist', 'stl10', 'svhn']:
+    #     for mmm in ['alexnet', 'convnet']:
+    #         args.d = ddd
+    #         args.m = mmm
+
+    print(args)
 
     args.mn = ""
 
@@ -646,9 +924,13 @@ if __name__ == "__main__":
         "nc": args.nc
     }
 
-    test_backdoor(device, args, clean_set)
+    # test_backdoor(device, args, clean_set)
 
-    reverse_engineer(device, args)
-    Spectral_Signatures(device, args)
-    strip(device, args, clean_set)
-    strip_for_test(device, args, clean_set)
+    # reverse_engineer(device, args)
+    # Spectral_Signatures(device, args)
+    # strip(device, args, clean_set)
+    # strip_for_test(device, args, clean_set)
+    # test_SCAn(args, clean_set, device)
+    # test_denoise(args, device, clean_set)
+
+
