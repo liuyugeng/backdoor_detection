@@ -20,7 +20,7 @@ from models import get_model, denoising_model
 from art.defences.transformer import poisoning
 from torch.utils.data import DataLoader, TensorDataset
 from art.estimators.classification import PyTorchClassifier
-from datas import get_data, CIFAR10_noise, STL10_noise, SVHN_noise, FashionMNIST_noise
+from utlis import get_data, CIFAR10_noise, STL10_noise, SVHN_noise, FashionMNIST_noise
 
 
 def train(model, target_label, train_loader, param, device):
