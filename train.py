@@ -16,7 +16,7 @@ import torchvision.transforms as transforms
 
 from spectre import _get_middle_output
 from art.defences.detector import poison
-from model import get_model, denoising_model
+from models import get_model, denoising_model
 from art.defences.transformer import poisoning
 from torch.utils.data import DataLoader, TensorDataset
 from art.estimators.classification import PyTorchClassifier
